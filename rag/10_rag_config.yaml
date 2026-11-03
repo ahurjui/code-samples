@@ -1,0 +1,118 @@
+# ============================================================================
+# RAG (retrieval-augmented generation) configuration — Layer 4b-a.
+# ============================================================================
+# Drives the docs indexer (`app.core.rag.DocsIndexer`) and the chat
+# assistant's retrieval stage (Layer 4b-b/c). Validated by `RagConfig` on
+# load; startup aborts with a field-level error if a value is wrong.
+#
+# docs-ref: docs/modules/core/rag.md
+
+# Connection to the Chroma server (resolved via env vars in the compose
+# stack — see `.env.example#CHROMA_HOST`).
+host: ${CHROMA_HOST}
+port: ${CHROMA_PORT}
+
+# One collection per corpus. The docs collection is what the chat
+# assistant queries; future corpora (ticket history, match notes)
+# land as sibling collections.
+collections:
+  docs:
+    # Stable name — renaming requires re-indexing + coordinating with
+    # every reader. Prefix `portal_` keeps us from clashing with any
+    # other Chroma user pointed at the same server.
+    name: portal_docs
+    # Files the indexer walks. `_templates` is excluded because the
+    # placeholders aren't useful retrieval hits.
+    # - docs/**/*.md  — business-logic + architecture docs
+    # - config/**/*.yaml — rule profiles, scheduler, LLM, RAG settings
+    source_globs:
+      - "docs/**/*.md"
+      - "config/**/*.yaml"
+    excludes:
+      - "docs/_templates/**"
+      - "docs/conventions/docs-code-sync.md"  # meta about the doc system
+
+  # Layer 4c-a: resolved tickets indexed by a compact "shape" text
+  # (leagues, odds bucket, leg count, warning profile, status). The
+  # source is the database, not the filesystem — `source_globs` is
+  # left off.
+  tickets:
+    name: portal_tickets
+
+  # Brainstorming specs, implementation plans, and ADRs.
+  # Populated by `tasks/index_specs.py`. Markdown chunker.
+  specs:
+    name: portal_specs
+    source_globs:
+      - "docs/superpowers/specs/**/*.md"
+      - "docs/superpowers/plans/**/*.md"
+      - "docs/decisions/**/*.md"
+    excludes: []
+
+  # Backend Python, frontend TypeScript/HTML/SCSS, and test files.
+  # Populated by `tasks/index_code.py`. Line-based code chunker.
+  code:
+    name: portal_code
+    source_globs:
+      - "backend/app/**/*.py"
+      - "backend/tests/**/*.py"
+      - "frontend/src/**/*.ts"
+      - "frontend/src/**/*.html"
+      - "frontend/src/**/*.scss"
+    excludes:
+      - "**/__pycache__/**"
+      - "**/node_modules/**"
+      - "**/dist/**"
+      - "**/.angular/**"
+    chunker: code
+
+  # Curated Knowledge base — markdown files and PDFs.
+  # NOTE: Knowledge base/ is gitignored. This collection is local-only.
+  # On a fresh checkout, run `docker compose exec scheduler python -m
+  # app.core.rag.tasks.index_kb` manually to populate it.
+  kb:
+    name: portal_kb
+    source_globs:
+      - "Knowledge base/**/*.md"
+      - "Knowledge base/**/*.pdf"
+    excludes: []
+    chunker: mixed
+
+# Books corpus (issue #209). Token-based chunker, BM25 sidecar for hybrid
+# search. Populated by the book-rag ingestion pipeline, not the docs indexer.
+# books_root is mounted from PORTAL_BOOKS_DIR in the compose stack.
+books:
+  name: portal_books
+  books_root: /data/books            # mounted from PORTAL_BOOKS_DIR
+  manifests_glob: "config/books/*.yaml"
+  bm25_sidecar_path: /chroma/books_bm25.json
+  chunk_target_tokens: 600
+  chunk_overlap_tokens: 50
+
+# Embedding model. `fastembed` resolves the name to a local ONNX
+# download on first use; subsequent runs are cached. 384-dim vectors
+# are a good fit for short-doc retrieval without the cost of 768-dim
+# or 1024-dim models.
+# `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (~220 MB)
+# handles 50+ languages including EN + RO natively, making it the right
+# choice for a bilingual assistant. Changing this model triggers a full
+# reindex on the next scheduler boot (`ensure_docs_indexed` detects the
+# model-id delta via the model-sentinel chunk).
+embedding:
+  model: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+  dimension: 384
+
+# Chunking. Markdown-aware splitter keeps headings attached to their
+# body so the chat model sees the context each snippet belongs to.
+chunk:
+  max_chars: 1200
+  overlap_chars: 120
+
+# Batch size for the embedder + Chroma upsert. Tuned so a full doc
+# re-index stays under one minute on a laptop.
+batch_size: 32
+
+# Trigger a full reindex when the scheduler starts and the docs collection
+# is empty. Set to false in production where the nightly 03:00 cron is the
+# authoritative indexing trigger and a boot-time reindex would just duplicate work.
+reindex_on_boot: true
