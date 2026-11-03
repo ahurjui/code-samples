@@ -1,0 +1,434 @@
+<div class="flex flex-col gap-4">
+  <app-page-header [heading]="'ticket.list.title' | translate" />
+
+  <!-- Filters bar -->
+  <div class="flex items-center gap-3 flex-wrap">
+    <div class="flex items-center gap-2">
+      <label hlmLabel for="date-filter" class="text-muted-foreground whitespace-nowrap">
+        {{ "ticket.list.filters.date" | translate }}
+      </label>
+      <app-day-nav [date]="dateFilter()" (dateChange)="dateFilter.set($event); applyFilters()">
+        <input
+          hlmInput
+          id="date-filter"
+          type="date"
+          size="sm"
+          [ngModel]="dateFilter()"
+          (ngModelChange)="dateFilter.set($event)"
+          (change)="applyFilters()"
+        />
+      </app-day-nav>
+      @if (dateFilter()) {
+        <button
+          hlmBtn
+          variant="ghost"
+          size="sm"
+          type="button"
+          (click)="dateFilter.set(''); applyFilters()"
+        >
+          {{ "ticket.list.filters.clear" | translate }}
+        </button>
+      }
+    </div>
+    <div class="flex items-center gap-2">
+      <label hlmLabel for="status-filter" class="text-muted-foreground whitespace-nowrap">
+        {{ "ticket.list.filters.status" | translate }}
+      </label>
+      <select
+        hlmInput
+        id="status-filter"
+        size="sm"
+        [ngModel]="statusFilter()"
+        (ngModelChange)="statusFilter.set($event); applyFilters()"
+        class="w-32"
+      >
+        <option value="">{{ "ticket.list.filters.allStatuses" | translate }}</option>
+        <option value="PENDING">PENDING</option>
+        <option value="WON">WON</option>
+        <option value="LOST">LOST</option>
+        <option value="VOID">VOID</option>
+        <option value="PARTIAL">PARTIAL</option>
+        <option value="ERROR">ERROR</option>
+      </select>
+    </div>
+    @if (allStrategyNames().length > 0) {
+      <div class="flex items-center gap-2">
+        <label hlmLabel for="strategy-filter" class="text-muted-foreground whitespace-nowrap">
+          {{ "ticket.list.filters.strategyLabel" | translate }}
+        </label>
+        <select
+          hlmInput
+          id="strategy-filter"
+          size="sm"
+          [ngModel]="strategyFilter()"
+          (ngModelChange)="strategyFilter.set($event); applyFilters()"
+          class="w-48"
+        >
+          <option value="">{{ "ticket.list.filters.strategyAll" | translate }}</option>
+          @for (name of allStrategyNames(); track name) {
+            <option [value]="name">{{ name | strategyLabel }}</option>
+          }
+        </select>
+      </div>
+    }
+    <div class="flex items-center gap-2">
+      <label hlmLabel for="recommendation-filter" class="text-muted-foreground whitespace-nowrap">
+        {{ "ticket.list.filters.recommendationLabel" | translate }}
+      </label>
+      <select
+        hlmInput
+        id="recommendation-filter"
+        size="sm"
+        [ngModel]="recommendationFilter()"
+        (ngModelChange)="recommendationFilter.set($event); applyFilters()"
+        class="w-48"
+      >
+        <option value="">{{ "ticket.list.filters.recommendationAll" | translate }}</option>
+        <option value="bet">
+          {{ "ticket.list.filters.recommendationOptions.bet" | translate }}
+        </option>
+        <option value="lean_bet">
+          {{ "ticket.list.filters.recommendationOptions.lean_bet" | translate }}
+        </option>
+        <option value="no_bet">
+          {{ "ticket.list.filters.recommendationOptions.no_bet" | translate }}
+        </option>
+      </select>
+    </div>
+  </div>
+
+  @if (loading()) {
+    <p class="text-sm text-muted-foreground">{{ "common.loading" | translate }}</p>
+  } @else if (error()) {
+    <p class="text-sm text-destructive">{{ error() }}</p>
+  } @else if (rows().length === 0) {
+    <div
+      class="rounded-lg border border-dashed border-border bg-card p-6 text-center text-sm text-muted-foreground"
+    >
+      {{ "ticket.list.empty" | translate }}
+    </div>
+  } @else {
+    <!-- P/L strip -->
+    <div hlmCard class="flex flex-col gap-2 px-4 py-3 text-sm">
+      <!-- Stake input row -->
+      <div class="flex flex-wrap items-center gap-3">
+        <span class="text-muted-foreground">{{ "ticket.list.pl.stake" | translate }}</span>
+        <input
+          type="number"
+          class="w-16 rounded border border-input bg-background px-2 py-1 text-right text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          [value]="stake()"
+          min="1"
+          (change)="onStakeChange(+$any($event.target).value)"
+        />
+        <span class="text-muted-foreground">RON</span>
+      </div>
+      <!-- Per-page P/L row -->
+      <div class="flex flex-wrap items-center gap-3">
+        <span class="w-8 text-xs font-medium text-muted-foreground uppercase tracking-wide">{{
+          "ticket.list.pl.page" | translate
+        }}</span>
+        <span class="text-muted-foreground"
+          >{{ "ticket.list.pl.won" | translate }}: {{ pl().won | number: "1.2-2" }}</span
+        >
+        <span class="text-muted-foreground"
+          >{{ "ticket.list.pl.lost" | translate }}: {{ pl().lost | number: "1.2-2" }}</span
+        >
+        <span
+          class="font-semibold"
+          [class.text-green-600]="pl().net > 0"
+          [class.text-destructive]="pl().net < 0"
+        >
+          {{ "ticket.list.pl.net" | translate }}: {{ pl().net | number: "1.2-2" }}
+        </span>
+      </div>
+      <!-- All-filtered P/L row -->
+      <div class="flex flex-wrap items-center gap-3 border-t border-border pt-2">
+        <span class="w-8 text-xs font-medium text-muted-foreground uppercase tracking-wide">{{
+          "ticket.list.pl.all" | translate
+        }}</span>
+        <span class="text-muted-foreground"
+          >{{ "ticket.list.pl.won" | translate }}: {{ allPl().won | number: "1.2-2" }}</span
+        >
+        <span class="text-muted-foreground"
+          >{{ "ticket.list.pl.lost" | translate }}: {{ allPl().lost | number: "1.2-2" }}</span
+        >
+        <span
+          class="font-semibold"
+          [class.text-green-600]="allPl().net > 0"
+          [class.text-destructive]="allPl().net < 0"
+        >
+          {{ "ticket.list.pl.net" | translate }}: {{ allPl().net | number: "1.2-2" }}
+        </span>
+        <span class="ml-auto text-xs text-muted-foreground">
+          {{ "ticket.list.pl.settled" | translate: { n: allPl().settled, m: allPl().total } }}
+        </span>
+      </div>
+    </div>
+
+    <div hlmCard class="overflow-hidden">
+      <div class="overflow-x-auto">
+        <table hlmTable>
+          <thead hlmTHead>
+            <tr hlmTr class="hover:bg-transparent">
+              <!-- Checkbox header -->
+              <th hlmTh class="w-10">
+                <input
+                  type="checkbox"
+                  class="h-4 w-4 rounded border-input"
+                  [checked]="allSelected()"
+                  (change)="toggleSelectAll()"
+                  aria-label="Select all"
+                />
+              </th>
+              <th hlmTh class="w-16 select-none">
+                {{ "ticket.list.columns.id" | translate }}
+              </th>
+              <th hlmTh class="select-none">
+                {{ "ticket.list.columns.summary" | translate }}
+              </th>
+              <th
+                hlmTh
+                class="cursor-pointer select-none hover:bg-muted/60"
+                (click)="sort('status')"
+              >
+                {{ "ticket.list.columns.status" | translate }}{{ sortIcon("status") }}
+              </th>
+              <th
+                hlmTh
+                class="cursor-pointer select-none hover:bg-muted/60"
+                (click)="sort('combined_odds')"
+              >
+                {{ "ticket.list.columns.combinedOdds" | translate }}{{ sortIcon("combined_odds") }}
+              </th>
+              <th
+                hlmTh
+                class="cursor-pointer select-none hover:bg-muted/60"
+                (click)="sort('legs_count')"
+              >
+                {{ "ticket.list.columns.legs" | translate }}{{ sortIcon("legs_count") }}
+              </th>
+              <th
+                hlmTh
+                class="cursor-pointer select-none hover:bg-muted/60"
+                (click)="sort('warnings_count')"
+              >
+                {{ "ticket.list.columns.warnings" | translate }}{{ sortIcon("warnings_count") }}
+              </th>
+              <th
+                hlmTh
+                class="cursor-pointer select-none hover:bg-muted/60"
+                (click)="sort('feeling_score')"
+              >
+                {{ "ticket.list.columns.feeling" | translate }}{{ sortIcon("feeling_score") }}
+              </th>
+              <th
+                hlmTh
+                class="cursor-pointer select-none hover:bg-muted/60"
+                (click)="sort('feeling_recommendation')"
+              >
+                {{ "ticket.list.columns.feelingRecommendation" | translate
+                }}{{ sortIcon("feeling_recommendation") }}
+              </th>
+              <th
+                hlmTh
+                class="cursor-pointer select-none hover:bg-muted/60"
+                (click)="sort('strategy')"
+              >
+                {{ "ticket.list.columns.strategy" | translate }}{{ sortIcon("strategy") }}
+              </th>
+              <!-- Action column -->
+              <th hlmTh class="w-10"></th>
+            </tr>
+          </thead>
+          <tbody hlmTBody>
+            @for (row of rows(); track row.id) {
+              <tr hlmTr>
+                <!-- Checkbox cell -->
+                <td hlmTd class="w-10" (click)="$event.stopPropagation()">
+                  <input
+                    type="checkbox"
+                    class="h-4 w-4 rounded border-input"
+                    [checked]="selectedIds().has(row.id)"
+                    (change)="toggleRow(row.id)"
+                    aria-label="Select row"
+                  />
+                </td>
+                <td hlmTd class="w-16 text-muted-foreground tabular-nums">
+                  {{ row.id }}
+                </td>
+                <td
+                  hlmTd
+                  class="cursor-pointer"
+                  [routerLink]="['/tickets', row.id]"
+                  [queryParams]="queryParams()"
+                  queryParamsHandling="merge"
+                >
+                  @for (leg of row.legs_summary; track $index) {
+                    <div class="text-xs leading-tight">
+                      {{ leg.home_team ?? "?" }} vs {{ leg.away_team ?? "?" }}
+                      @if (leg.kickoff) {
+                        · {{ leg.kickoff | date: "HH:mm" }}
+                      } @else {
+                        · {{ "ticket.list.kickoffTbd" | translate }}
+                      }
+                      · {{ leg.market | marketLabel }} {{ leg.outcome | outcomeLabel }}
+                    </div>
+                  }
+                </td>
+                <td
+                  hlmTd
+                  class="cursor-pointer"
+                  [routerLink]="['/tickets', row.id]"
+                  [queryParams]="queryParams()"
+                  queryParamsHandling="merge"
+                >
+                  <app-ticket-status-badge [status]="row.status" />
+                </td>
+                <td
+                  hlmTd
+                  class="cursor-pointer"
+                  [routerLink]="['/tickets', row.id]"
+                  [queryParams]="queryParams()"
+                  queryParamsHandling="merge"
+                >
+                  {{ row.combined_odds | number: "1.2-2" }}
+                </td>
+                <td
+                  hlmTd
+                  class="cursor-pointer"
+                  [routerLink]="['/tickets', row.id]"
+                  [queryParams]="queryParams()"
+                  queryParamsHandling="merge"
+                >
+                  {{ row.leg_count }}
+                </td>
+                <td
+                  hlmTd
+                  class="cursor-pointer"
+                  [routerLink]="['/tickets', row.id]"
+                  [queryParams]="queryParams()"
+                  queryParamsHandling="merge"
+                >
+                  {{ row.warning_count }}
+                </td>
+                <td
+                  hlmTd
+                  class="cursor-pointer"
+                  [routerLink]="['/tickets', row.id]"
+                  [queryParams]="queryParams()"
+                  queryParamsHandling="merge"
+                >
+                  @if (row.feeling_score == null) {
+                    <span class="text-muted-foreground">—</span>
+                  } @else {
+                    {{ row.feeling_score }}
+                  }
+                </td>
+                <td
+                  hlmTd
+                  class="cursor-pointer"
+                  [routerLink]="['/tickets', row.id]"
+                  [queryParams]="queryParams()"
+                  queryParamsHandling="merge"
+                >
+                  @if (row.feeling_recommendation == null) {
+                    <span class="text-muted-foreground">—</span>
+                  } @else {
+                    <span
+                      data-testid="rec-badge"
+                      [class]="feelingRecommendationBadgeClass(row.feeling_recommendation)"
+                    >
+                      {{ feelingRecommendationLabelKey(row.feeling_recommendation) | translate }}
+                    </span>
+                  }
+                </td>
+                <td
+                  hlmTd
+                  class="cursor-pointer text-xs text-muted-foreground"
+                  [routerLink]="['/tickets', row.id]"
+                  [queryParams]="queryParams()"
+                  queryParamsHandling="merge"
+                >
+                  @if (row.strategy_name) {
+                    {{ row.strategy_name | strategyLabel }}
+                  } @else {
+                    <span>—</span>
+                  }
+                </td>
+                <!-- Row action -->
+                <td hlmTd class="w-10" (click)="$event.stopPropagation()">
+                  <button
+                    type="button"
+                    class="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+                    [brnMenuTriggerFor]="rowMenu"
+                    aria-label="Row actions"
+                  >
+                    ⋯
+                  </button>
+                  <ng-template #rowMenu>
+                    <div brnMenu hlmDropdownMenu class="w-36">
+                      <a
+                        brnMenuItem
+                        hlmDropdownMenuItem
+                        [routerLink]="['/tickets', row.id]"
+                        [queryParams]="queryParams()"
+                        queryParamsHandling="merge"
+                      >
+                        {{ "ticket.list.actions.view" | translate }}
+                      </a>
+                    </div>
+                  </ng-template>
+                </td>
+              </tr>
+            }
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Pagination footer -->
+      <div
+        class="flex flex-col gap-2 px-4 py-3 sm:flex-row sm:items-center sm:justify-between border-t border-border"
+      >
+        <!-- Page-size selector -->
+        <div class="flex items-center gap-2 text-sm text-muted-foreground">
+          <span>{{ "ticket.list.pagination.rowsPerPage" | translate }}</span>
+          <select
+            class="rounded border border-input bg-background px-2 py-1 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            (change)="onPageSizeChange(+$any($event.target).value)"
+          >
+            @for (size of pageSizes; track size) {
+              <option [value]="size" [selected]="size === pageSize()">{{ size }}</option>
+            }
+          </select>
+        </div>
+
+        <!-- Prev / page / Next -->
+        <div class="flex items-center gap-2">
+          <button
+            hlmBtn
+            variant="outline"
+            size="sm"
+            type="button"
+            [disabled]="currentPage() === 1"
+            (click)="goToPage(currentPage() - 1)"
+          >
+            ← {{ "ticket.list.pagination.prev" | translate }}
+          </button>
+          <span class="text-sm text-muted-foreground">
+            {{ "ticket.list.pagination.page" | translate }} {{ currentPage() }} / {{ totalPages }}
+          </span>
+          <button
+            hlmBtn
+            variant="outline"
+            size="sm"
+            type="button"
+            [disabled]="currentPage() >= totalPages"
+            (click)="goToPage(currentPage() + 1)"
+          >
+            {{ "ticket.list.pagination.next" | translate }} →
+          </button>
+        </div>
+      </div>
+    </div>
+  }
+</div>
