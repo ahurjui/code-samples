@@ -1,0 +1,46 @@
+# Templated report definition — the pattern I use for config-driven reporting:
+# analysts add or adjust reports by editing YAML; an engine validates the spec
+# and renders it into BigQuery SQL (partition filters and dedup included), so
+# report changes never require code changes.
+#
+# This spec corresponds to usage_margin_report.sql in this folder.
+
+report: customer_margin_monthly
+description: Per-customer, per-service cost/revenue/margin rollup for one month.
+
+source:
+  table: billing_demo.usage_events
+  partition_field: occurred_at        # engine refuses to render without a partition filter
+
+dedup:
+  key: record_id                      # redelivery-safe: latest ingested copy wins
+  order_by: ingested_at DESC
+
+parameters:
+  - name: report_month
+    type: DATE
+    default: previous_month           # resolved by the engine at render time
+
+columns:
+  - id: customer
+    expr: customer_id
+    group_by: true
+  - id: service
+    expr: service
+    group_by: true
+  - id: records
+    expr: COUNT(*)
+  - id: cost
+    expr: SUM(cost_cents)
+    format: money_cents
+  - id: revenue
+    expr: SUM(price_cents)
+    format: money_cents
+  - id: margin
+    expr: SUM(price_cents) - SUM(cost_cents)
+    format: money_cents
+  - id: margin_bps
+    expr: SAFE_DIVIDE((SUM(price_cents) - SUM(cost_cents)) * 10000, SUM(price_cents))
+    format: basis_points
+
+order_by: [customer, revenue DESC]

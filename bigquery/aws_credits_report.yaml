@@ -1,0 +1,287 @@
+# =============================================================================
+# Report definition: AWS Credits — Allocation & Reconciliation
+# =============================================================================
+# Consumed by a config-driven reporting engine: this spec is validated against
+# a column registry, rendered into BigQuery SQL (partition filters and dedup
+# enforced by the engine, never left to the report author), executed, and the
+# results served to the UI with formats, groupings and drill-downs attached.
+#
+# Written as a portfolio sample over the public AWS CUR 2.0 schema.
+# =============================================================================
+
+report:
+  id: aws_credits_allocation
+  version: 3
+  title: "AWS Credits — Allocation & Reconciliation"
+  description: >
+    Per-customer view of AWS credits received in a billing period: which
+    accounts and services the credits landed on, which credit programs they
+    came from, how they offset gross usage, and where the data itself is
+    suspect (unmapped accounts, missing loads, sign anomalies). Designed for
+    reseller month-end reconciliation against the AWS invoice.
+  category: billing/credits
+  owner: billing-reports
+  refresh: daily_after_cur_load        # engine schedules after the load manifest confirms
+
+# -----------------------------------------------------------------------------
+# Sources & joins
+# -----------------------------------------------------------------------------
+source:
+  primary:
+    table: aws_billing.cur_line_items
+    alias: li
+    partition_field: bill_billing_period_start_date   # engine refuses to render without a bound filter
+    cluster_hint: [line_item_usage_account_id]
+  joins:
+    - table: aws_billing.account_map
+      alias: acct
+      type: LEFT                       # unmapped accounts must SURFACE, not vanish
+      on: "acct.account_id = li.line_item_usage_account_id"
+    - table: aws_billing.credit_programs
+      alias: prog
+      type: LEFT
+      on: "prog.description_pattern_matches(li.line_item_line_item_description)"
+    - table: aws_billing.load_manifest
+      alias: load
+      type: INNER
+      on: "load.period_start = DATE(li.bill_billing_period_start_date)"
+
+dedup:
+  # CUR is delivered cumulatively and re-delivered within the month; keep the
+  # latest confirmed load per account+period. Engine renders this as a
+  # QUALIFY ROW_NUMBER() window — report authors never hand-write it.
+  key: [line_item_usage_account_id, bill_billing_period_start_date]
+  order_by: "load.loaded_at DESC"
+
+# -----------------------------------------------------------------------------
+# Parameters (rendered into WHERE; all optional unless required: true)
+# -----------------------------------------------------------------------------
+parameters:
+  - name: billing_period
+    type: DATE
+    required: true
+    default: previous_month
+    maps_to: "DATE(li.bill_billing_period_start_date) = :billing_period"
+  - name: customer_id
+    type: STRING
+    maps_to: "acct.customer_id = :customer_id"
+  - name: account_id
+    type: STRING
+    maps_to: "li.line_item_usage_account_id = :account_id"
+  - name: service
+    type: STRING
+    repeatable: true                   # multi-select in the UI
+    maps_to: "li.product_product_name IN UNNEST(:service)"
+  - name: credit_program
+    type: STRING
+    maps_to: "prog.program_code = :credit_program"
+  - name: min_credit_amount
+    type: NUMERIC
+    maps_to: "HAVING credit_amount >= :min_credit_amount"
+  - name: include_zero_rows
+    type: BOOL
+    default: false
+    maps_to: "HAVING (credit_amount != 0 OR gross_usage != 0)"   # inverted when true
+
+line_item_scope:
+  include_types: [Usage, DiscountedUsage, Credit]
+  # Refund / Tax / RIFee / SavingsPlanNegation are excluded BY DESIGN: mixing
+  # them into a credits report is the classic way month-end stops matching the
+  # AWS invoice. Each has its own report.
+  exclude_types: [Refund, Tax, RIFee, Fee, SavingsPlanNegation]
+
+# -----------------------------------------------------------------------------
+# Column catalog
+# -----------------------------------------------------------------------------
+# group: identity | program | amounts | coverage | quality | audit
+# Only columns listed in a view are rendered; everything else stays available
+# for ad-hoc column picking in the UI.
+columns:
+  # --- identity -------------------------------------------------------------
+  - id: customer
+    group: identity
+    expr: "COALESCE(acct.customer_name, CONCAT('UNMAPPED ACCOUNT ', li.line_item_usage_account_id))"
+    format: text
+    description: "Reseller customer; unmapped accounts flagged inline so data gaps are impossible to miss."
+  - id: customer_id
+    group: identity
+    expr: "acct.customer_id"
+    format: text
+  - id: account_id
+    group: identity
+    expr: "li.line_item_usage_account_id"
+    format: aws_account_id
+    description: "12-digit AWS usage account."
+  - id: payer_account_id
+    group: identity
+    expr: "li.bill_payer_account_id"
+    format: aws_account_id
+  - id: account_status
+    group: identity
+    expr: "acct.status"
+    format: enum
+    enum: [active, suspended, closed, pending_transfer]
+  - id: billing_period
+    group: identity
+    expr: "DATE(li.bill_billing_period_start_date)"
+    format: month
+  - id: service
+    group: identity
+    expr: "li.product_product_name"
+    format: text
+  - id: region
+    group: identity
+    expr: "li.product_region"
+    format: text
+
+  # --- credit program -------------------------------------------------------
+  - id: credit_program
+    group: program
+    expr: "COALESCE(prog.program_code, 'UNCLASSIFIED')"
+    format: enum_open
+    description: "Program matched from the credit line description (promotional, migration, EDP true-up, support goodwill...); UNCLASSIFIED lines feed the pattern backlog."
+  - id: credit_program_name
+    group: program
+    expr: "prog.display_name"
+    format: text
+  - id: credit_descriptions
+    group: program
+    expr: "ARRAY_AGG(DISTINCT IF(li.line_item_line_item_type = 'Credit', li.line_item_line_item_description, NULL) IGNORE NULLS LIMIT 20)"
+    format: text_list
+    description: "Raw AWS credit descriptions feeding this row — the drill-down evidence."
+  - id: credit_expiry
+    group: program
+    expr: "prog.expires_on"
+    format: date
+    nullable: true
+
+  # --- amounts (NUMERIC end to end; rounded once, at presentation) ----------
+  - id: credit_lines
+    group: amounts
+    expr: "COUNTIF(li.line_item_line_item_type = 'Credit')"
+    format: integer
+  - id: credit_amount
+    group: amounts
+    expr: "SUM(IF(li.line_item_line_item_type = 'Credit', -CAST(li.line_item_unblended_cost AS NUMERIC), 0))"
+    format: money_usd
+    description: "Credits received. CUR stores credits as negative cost; sign flipped so the report reads positive-received."
+  - id: gross_usage
+    group: amounts
+    expr: "SUM(IF(li.line_item_line_item_type IN ('Usage','DiscountedUsage'), CAST(li.line_item_unblended_cost AS NUMERIC), 0))"
+    format: money_usd
+  - id: net_position
+    group: amounts
+    expr: "gross_usage - credit_amount"        # derived: engine substitutes column exprs
+    format: money_usd
+    description: "What the customer actually owes for the period after credits."
+  - id: amortized_usage
+    group: amounts
+    expr: "SUM(IF(li.line_item_line_item_type = 'DiscountedUsage', CAST(li.line_item_net_unblended_cost AS NUMERIC), 0))"
+    format: money_usd
+    nullable: true
+    requires_cur_feature: net_costs            # column exists only on CUR exports with net cost enabled
+
+  # --- coverage metrics -----------------------------------------------------
+  - id: coverage_bps
+    group: coverage
+    expr: "CAST(SAFE_DIVIDE(credit_amount * 10000, gross_usage) AS INT64)"
+    format: basis_points
+    description: "Credit coverage of gross usage. SAFE_DIVIDE: credit-only months (zero usage) are NULL, not errors."
+  - id: customer_revenue_share
+    group: coverage
+    expr: "SAFE_DIVIDE(gross_usage, SUM(gross_usage) OVER (PARTITION BY acct.customer_id))"
+    format: percent_4dp
+    description: "This row's share of the customer's total usage — ranks where credits actually matter."
+  - id: mom_credit_delta
+    group: coverage
+    expr: "credit_amount - LAG(credit_amount) OVER (PARTITION BY acct.customer_id, li.product_product_name ORDER BY DATE(li.bill_billing_period_start_date))"
+    format: money_usd_signed
+    window_scope: cross_period                 # engine widens the partition scan for window-over-history columns
+    description: "Month-over-month credit movement; expiring-program detection feeds from this."
+
+  # --- data quality (the columns that make reconciliation trustworthy) ------
+  - id: is_unmapped_account
+    group: quality
+    expr: "acct.account_id IS NULL"
+    format: flag
+    severity: error
+    description: "Account absent from the hierarchy map. Rows stay IN the report, flagged — silent drops are how totals lie."
+  - id: is_unclassified_credit
+    group: quality
+    expr: "prog.program_code IS NULL AND credit_lines > 0"
+    format: flag
+    severity: warning
+  - id: has_sign_anomaly
+    group: quality
+    expr: "COUNTIF(li.line_item_line_item_type = 'Credit' AND CAST(li.line_item_unblended_cost AS NUMERIC) > 0) > 0"
+    format: flag
+    severity: error
+    description: "A 'Credit' line with positive cost — seen in the wild after AWS re-bills; must be investigated, never auto-summed."
+  - id: load_completeness
+    group: quality
+    expr: "load.status"
+    format: enum
+    enum: [complete, partial, superseded]
+    description: "From the load manifest; 'partial' means the CUR month isn't final and totals will move."
+
+  # --- audit ----------------------------------------------------------------
+  - id: cur_version
+    group: audit
+    expr: "load.cur_version_id"
+    format: text
+  - id: loaded_at
+    group: audit
+    expr: "load.loaded_at"
+    format: timestamp_utc
+  - id: rendered_query_hash
+    group: audit
+    engine_provided: true
+    format: text
+    description: "Engine stamps the SQL hash on every run — any number can be traced to the exact query that produced it."
+
+# -----------------------------------------------------------------------------
+# Views (column selections + grouping presets the UI offers)
+# -----------------------------------------------------------------------------
+views:
+  - id: reconciliation
+    title: "Month-end reconciliation"
+    default: true
+    group_by: [customer, service]
+    columns: [customer, account_id, service, credit_program, credit_lines,
+              credit_amount, gross_usage, net_position, coverage_bps,
+              is_unmapped_account, has_sign_anomaly, load_completeness]
+    order_by: [customer ASC, credit_amount DESC]
+    totals_row: [credit_amount, gross_usage, net_position]
+  - id: program_breakdown
+    title: "By credit program"
+    group_by: [credit_program, customer]
+    columns: [credit_program, credit_program_name, customer, credit_amount,
+              credit_expiry, mom_credit_delta, is_unclassified_credit]
+    order_by: [credit_amount DESC]
+  - id: data_quality
+    title: "Data quality exceptions"
+    filter_preset: "is_unmapped_account OR is_unclassified_credit OR has_sign_anomaly OR load_completeness != 'complete'"
+    columns: [customer, account_id, service, credit_amount,
+              is_unmapped_account, is_unclassified_credit, has_sign_anomaly,
+              load_completeness, cur_version, loaded_at]
+
+drilldowns:
+  - from_view: reconciliation
+    on_column: credit_amount
+    to_report: aws_credits_line_detail        # separate spec: raw CUR credit lines behind one cell
+    carry_params: [billing_period, customer_id, account_id, service]
+
+exports:
+  - format: csv
+    views: [reconciliation, program_breakdown]
+  - format: scheduled_email
+    view: data_quality
+    schedule: "first business day after refresh"
+    recipients_role: billing-ops
+    only_if_rows: true                        # silence when the data is clean
+
+access:
+  view_roles: [billing-ops, finance, account-managers]
+  export_roles: [billing-ops, finance]
+  row_level:
+    account-managers: "acct.customer_id IN (:assigned_customers)"   # AMs see only their book
